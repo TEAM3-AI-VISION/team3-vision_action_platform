@@ -19,6 +19,6 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # STEP 3: /analyses/ 로 시작하는 주소는 app/urls.py 가 처리한다
-    path('analyses/', include('app.urls')),
+    # STEP 3: /analyses/ 로 시작하는 주소는 analyses/urls.py 가 처리한다
+    path('analyses/', include('analyses.urls')),
 ]

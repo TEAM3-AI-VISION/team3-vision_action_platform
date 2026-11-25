@@ -1,3 +1,4 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -14,7 +15,8 @@
     <div id="result"></div>
 
     <!-- STEP 2: JavaScript 연결 (HTML 요소가 다 만들어진 뒤에 읽도록 body 맨 끝에 둠) -->
-    <script src="analyze.js"></script>
+    <!-- STEP 3: Django가 /static/ 주소로 JS를 내보내므로 static 태그로 경로를 만든다 -->
+    <script src="{% static 'analyze.js' %}"></script>
 
 </body>
 </html>

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 동작 분석</title>
+</head>
+<body>
+    <h1>AI 동작 분석</h1>
+        <form id="analysis-form">
+        <input type="file" id="video-input" name="video" accept="video/*">
+        <button type="submit" id="analyze-btn">AI 분석</button>
+    </form>
+    <div id="result"></div>
+
+    <!-- STEP 2: JavaScript 연결 (HTML 요소가 다 만들어진 뒤에 읽도록 body 맨 끝에 둠) -->
+    <script src="analyze.js"></script>
+
+</body>
+</html>

@@ -37,7 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'app',  # STEP 3: 우리가 만든 앱 등록
+    'analyses',  # STEP 3: 우리가 만든 앱 등록
 ]
 
 MIDDLEWARE = [

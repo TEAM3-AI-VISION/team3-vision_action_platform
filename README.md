@@ -13,7 +13,7 @@
 | 5 | Django → DB에 업로드 기록 저장 (`InferenceRecord`) | B2 + B1 | ✅ 완료 (PR #7) |
 | 6 | 17동작 모델로 실제 영상 추론 | C1 | ✅ 완료 (PR #6) |
 | 7 | FastAPI에서 추론 결과 반환 | C2 + C1 | ✅ 완료 (PR #9) |
-| 8 | Django ↔ FastAPI HTTP 연결 | B1 + C2 | ⬜ |
+| 8 | Django ↔ FastAPI HTTP 연결 | B1 + C2 | ✅ 완료 (PR #11) |
 | 9 | 저장된 결과를 JavaScript로 표시 | B1 + B2 + A2 | ⬜ |
 | 10 | 기능 파이프라인 추적·정리 | 전원 | ⬜ |
 
@@ -150,6 +150,78 @@ STEP 4까지의 내용 중 STEP 5에서 코드가 바뀐 부분이다.
 | `/api/v1/analyze/` 응답 | `{"filename", "size"}` | `{"id", "status", "filename", "size"}` |
 | `requirements.txt` | Django, DRF | + `psycopg[binary]`, `python-dotenv` |
 | 실행 준비 | `pip install` 후 바로 `runserver` | `.env` 작성 → `migrate` → `runserver` |
+
+## STEP 6·7: 17동작 추론 + FastAPI
+
+상태: ✅ 완료 (C1 + C2)
+
+### 요약
+
+- `ai/inference.py` 한 파일이 MP4 하나를 받아 **사람별로 17동작 중 하나와 신뢰도**를 돌려준다. Django 없이 혼자 실행할 수 있다.
+- `ai/main.py`의 `POST /predict/video`는 받은 영상을 임시 파일로 저장하고 `inference.predict_video()` 결과를 그대로 돌려준다.
+
+```
+MP4
+ → YOLO11m-pose + ByteTrack: Frame마다 사람별 관절 17개 (사람 번호를 끝까지 유지)
+ → 관절 → 값 40개 (몸 크기로 나눈 좌표 34 + 팔꿈치·무릎 각도 4 + 엉덩이 화면 위치 2)
+ → 8초 창(4초씩 이동)을 30칸으로 맞추고 변화량·통계·움직임 요약을 더해 2,646개
+ → ExtraTrees 확률과 1D-CNN 확률의 평균 → 창이 여러 개면 다시 평균
+ → 사람별 1등 · top3 · uncertain(0.3 미만)
+```
+
+### 실행
+
+```bash
+cd ai
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python inference.py data/sample.mp4   # FastAPI 없이 바로 확인
+uvicorn main:app --port 8001          # FastAPI (http://localhost:8001/docs)
+```
+
+- 모델 파일은 `ai/models/`에 들어 있어 따로 받을 필요가 없다.
+
+### 응답
+
+| 이름 | 뜻 |
+|---|---|
+| `predictions` | 판단한 사람마다 1개 (`track_id` 순서) |
+| `action_id` / `action_name_ko` | 동작 번호 / 한글 이름 (예: `A001` 키오스크 두드리기) |
+| `confidence` | 1등 동작의 확률 (0~1) |
+| `uncertain` | `confidence`가 0.3보다 낮으면 `true` |
+| `top3` | 확률이 높은 동작 3개 |
+| `message` | 정상이면 `""`, 사람을 못 찾았거나 판단을 못 하면 그 이유 |
+
+| 요청 | 응답 |
+|---|---|
+| MP4 | `200` |
+| MP4가 아닌 파일 | `400` |
+| 읽을 수 없는 영상 | `422` |
+
+### 왜 이렇게 했나
+
+- **몸 크기로 나눈 좌표**: 카메라와의 거리가 달라도 같은 동작이면 비슷한 값이 나오게 했다.
+- **8초 창**: 학습 영상 길이(중간값 5.4초)를 덮는 길이다. 긴 영상은 4초씩 밀며 여러 창으로 보고 평균한다.
+- **두 모델 평균**: ExtraTrees는 자세 모양을, 1D-CNN은 시간에 따른 움직임을 잘 본다. 둘을 평균한 것이 하나만 쓸 때보다 정확했다.
+- **카메라 각도를 바꿔 가며 학습**: 실제 매장 카메라 구도가 학습 영상과 달라서, 관절 좌표를 돌려 다른 각도에서 찍은 것처럼 만들어 함께 학습했다.
+
+### 모델 결과
+
+| 평가 | 결과 |
+|---|---|
+| 학습에 안 쓴 사람(S05) 테스트 | 93.5% |
+| 학습에 안 쓴 현장 영상 (다른 카메라 구도) | 15개 중 15개 |
+
+### 처리 시간 (7초 영상)
+
+| 컴퓨터 | 첫 요청 | 두 번째부터 |
+|---|---|---|
+| GPU | 약 7.5초 | 약 5초 |
+| CPU만 | 약 32초 | 약 32초 |
+
+- 첫 요청은 모델을 읽느라 조금 더 걸린다.
+- CPU만 있으면 영상 길이의 4~5배가 걸린다. Django 타임아웃이 120초라서 CPU에서는 약 25초가 넘는 영상이 `FAILED`가 될 수 있다. 시연은 GPU 컴퓨터에서 한다.
 
 ## STEP 8: Django ↔ FastAPI 연결
 

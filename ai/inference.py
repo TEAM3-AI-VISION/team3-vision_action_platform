@@ -28,6 +28,7 @@ STEPS = 30          # 창 하나를 30칸으로
 WINDOW = 8.0        # 창 길이(초). 학습 영상 중간값 5.4초 → 동작 하나가 들어간다
 STRIDE = 4.0        # 긴 영상은 4초씩 밀며 여러 창
 UNCERTAIN = 0.3     # 1등 확률이 이보다 낮으면 불확실
+PROCESS_FPS = 15    # 1초에 15장만 관절을 찾는다. 30장과 1등이 같고(영상 84개) 시간은 절반
 ACTIONS = {
     "A001": "키오스크 두드리기", "A002": "한손 물건 던지기", "A003": "앞차기", "A004": "잡고 흔들기",
     "A005": "밀치기", "A006": "휘두르기", "A007": "바닥에 앉기", "A008": "위에 앉기", "A009": "앞으로 눕기",
@@ -98,7 +99,7 @@ def track_people(path, models):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not 0 < fps <= 240:                          # fps 정보가 없거나 이상하면 30 으로
         fps = 30.0
-    step = max(1, round(fps / 30))                  # 60fps 영상은 2장 중 1장만 → 처리 시간 절반
+    step = max(1, round(fps / PROCESS_FPS))         # 30fps 영상은 2장 중 1장, 60fps 는 4장 중 1장
     people, n = {}, 0
     while True:
         ok, frame = cap.read()
@@ -244,7 +245,7 @@ def predict_video(path):
     message = ""
     if not predictions:
         message = "사람은 보였지만 동작을 판단하지 못했습니다." if people else "영상에서 사람을 찾지 못했습니다."
-    return {"message": message, "processing_seconds": round(time.perf_counter() - started, 2),   # GPU 약 5초, CPU 약 32초 (7초 영상)
+    return {"message": message, "processing_seconds": round(time.perf_counter() - started, 2),   # 7초 영상이 GPU 약 3초, CPU 약 16초
             "predictions": predictions}
 
 

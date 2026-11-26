@@ -10,9 +10,9 @@
 | 2 | JavaScript에서 submit 이벤트 받기 | A2 | ✅ 완료 (PR #1) |
 | 3 | Django에서 `/analyses/` 화면 열기 | B1 + A1 | ✅ 완료 (PR #2, #3) |
 | 4 | JavaScript → Django API로 영상 전송 | A2 + B1 | ✅ 완료 (`hu` 브랜치 PR) |
-| 5 | Django → DB에 업로드 기록 저장 (`InferenceRecord`) | B2 + B1 | ⬜ 다음 단계 |
-| 6 | 17동작 모델로 실제 영상 추론 | C1 | 🔄 진행 중 (`hyesung` 브랜치) |
-| 7 | FastAPI에서 추론 결과 반환 | C2 + C1 | ⬜ |
+| 5 | Django → DB에 업로드 기록 저장 (`InferenceRecord`) | B2 + B1 | ✅ 완료 (PR #7) |
+| 6 | 17동작 모델로 실제 영상 추론 | C1 | ✅ 완료 (PR #6) |
+| 7 | FastAPI에서 추론 결과 반환 | C2 + C1 | ✅ 완료 (PR #9) |
 | 8 | Django ↔ FastAPI HTTP 연결 | B1 + C2 | ⬜ |
 | 9 | 저장된 결과를 JavaScript로 표시 | B1 + B2 + A2 | ⬜ |
 | 10 | 기능 파이프라인 추적·정리 | 전원 | ⬜ |

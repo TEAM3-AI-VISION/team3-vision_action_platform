@@ -5,6 +5,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
 
 from .models import InferenceRecord
 
@@ -107,4 +108,16 @@ def analyze(request):
         'predicted_label': record.predicted_label,
         'confidence': record.confidence,
         'message': message if isinstance(message, str) else str(message),
+    })
+
+
+@api_view(['GET'])
+def get_result(request, pk):
+    """STEP 9: 저장된 분석 기록 1건을 DB에서 다시 꺼내 반환한다."""
+    record = get_object_or_404(InferenceRecord, pk=pk)
+    return Response({
+        'id': record.id,
+        'status': record.status,
+        'predicted_label': record.predicted_label,
+        'confidence': record.confidence,
     })

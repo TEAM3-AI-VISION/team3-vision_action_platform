@@ -1,0 +1,11 @@
+# 모델(joblib)을 만든 환경과 같은 버전이어야 모델이 열린다
+scikit-learn==1.9.1
+numpy==2.5.4
+joblib==1.6.0
+torch>=2.5
+ultralytics==8.4.203
+opencv-python-headless>=4.10
+lap>=0.5.12
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9

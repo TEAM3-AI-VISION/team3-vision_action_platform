@@ -9,25 +9,12 @@
       "double",
       "pad"
     ],
-    "per_clip": 2,
-    "code": "scripts/27_field_robust.py variant"
+    "per_clip": 2
   },
   "camera_augmentation": {
     "per_clip": 1,
     "yaw_max_deg": 60.0,
-    "pitch_max_deg": 45.0,
-    "code": "src/camera_augment.py camera_view"
-  },
-  "calibration": {
-    "file": "calibration.json",
-    "features": [
-      "p1",
-      "p2",
-      "margin",
-      "log_ratio",
-      "entropy"
-    ],
-    "source": "scripts/28_team_merge.py --calib +cam+kin86 (S01~S04 4-fold 예측, 난수 3 × 변형 5)"
+    "pitch_max_deg": 45.0
   },
   "sequence_steps": 30,
   "frame_features": [
@@ -210,8 +197,7 @@
       1
     ],
     "cnn_width": 128,
-    "combine": "mean(ExtraTrees, 1D-CNN)",
-    "code": "src/temporal_cnn.py"
+    "combine": "mean(ExtraTrees, 1D-CNN)"
   },
   "model_params": {
     "class_weight": "balanced",

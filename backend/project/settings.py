@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',  # STEP 4: DRF(Django REST Framework) 등록
     'analyses',  # STEP 3: 우리가 만든 앱 등록
 ]
 

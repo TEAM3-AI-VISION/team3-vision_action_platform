@@ -94,6 +94,9 @@ DATABASES = {
     }
 }
 
+# STEP 8: Django가 영상을 보낼 FastAPI(AI 서버) 주소. backend/.env 에서 읽는다.
+FASTAPI_URL = os.getenv('FASTAPI_URL', 'http://localhost:8001')
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators

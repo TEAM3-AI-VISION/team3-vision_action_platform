@@ -14,7 +14,7 @@
 | 6 | 17동작 모델로 실제 영상 추론 | C1 | ✅ 완료 (PR #6) |
 | 7 | FastAPI에서 추론 결과 반환 | C2 + C1 | ✅ 완료 (PR #9) |
 | 8 | Django ↔ FastAPI HTTP 연결 | B1 + C2 | ✅ 완료 (PR #11) |
-| 9 | 저장된 결과를 JavaScript로 표시 | B1 + B2 + A2 | ⬜ |
+| 9 | 저장된 결과를 JavaScript로 표시 | B1 + B2 + A2 | ✅ 완료 |
 | 10 | 기능 파이프라인 추적·정리 | 전원 | ⬜ |
 
 ### STEP 4 요약
@@ -317,3 +317,55 @@ STEP 5까지의 내용 중 STEP 8에서 코드가 바뀐 부분이다.
 | `/api/v1/analyze/` 응답 | `{"id", "status", "filename", "size"}` | + `predicted_label`, `confidence`, `message` (연결 실패 시 `502`와 `error`) |
 | `requirements.txt` | Django, DRF, psycopg, python-dotenv | + `requests` |
 | `.env` | DB 접속 정보 | + `FASTAPI_URL` |
+
+## STEP 9: 저장된 결과를 다시 조회하기
+
+상태: ✅ 완료 (조회 API B2, URL 연결 B1, 화면 표시 A2)
+
+### 요약
+
+- `GET /api/v1/analyze/{id}/`는 PostgreSQL에 저장된 분석 기록 1건을 다시 꺼내 돌려준다.
+- POST 응답은 방금 계산한 값이고, GET 응답은 DB에 저장된 값이다. 두 값이 같으면 저장이 제대로 됐다는 뜻이다.
+- B2: `views.get_result()`가 `get_object_or_404()`로 기록을 조회한다. 읽기만 하고 저장하지 않는다.
+- B1: `analyses/api_urls.py`에 `analyze/<int:pk>/`를 추가했다. `project/urls.py`는 바꾸지 않았다.
+- A2: `analyze.js`가 POST 응답의 `id`로 GET을 한 번 더 보내고, 그 결과를 `#result`에 표시한다.
+  - `COMPLETED` → `예측 동작: A005 (신뢰도 95.8%)`
+  - `FAILED` → `분석에 실패했습니다.`
+  - POST·GET이 실패하면(`400`, `404`, `502`) 상태 코드와 이유를 표시한다.
+
+### 흐름
+
+```
+GET /api/v1/analyze/3/
+ → project/urls.py  path('api/v1/', include('analyses.api_urls'))
+ → analyses/api_urls.py  path('analyze/<int:pk>/', views.get_result)   # 숫자 3 → pk=3
+ → views.get_result(request, pk=3)
+ → get_object_or_404(InferenceRecord, pk=3)   # SELECT ... WHERE id = 3
+ → {"id": 3, "status": ..., "predicted_label": ..., "confidence": ...}
+```
+
+### 응답 명세
+
+| 경우 | HTTP | 응답 |
+|---|---|---|
+| 기록 있음 | `200` | `{"id", "status", "predicted_label", "confidence"}` |
+| 없는 id | `404` | `{"detail": "..."}` |
+| 숫자가 아닌 id (`/analyze/abc/`) | `404` | URL이 맞지 않음 (`<int:pk>`) |
+| GET이 아닌 요청 | `405` | `{"detail": "..."}` |
+
+`predicted_label`, `confidence`는 `COMPLETED`가 아니면 `null`이다.
+
+### 검증 결과
+
+| 테스트 | 결과 |
+|---|---|
+| 있는 기록 조회 (`COMPLETED`) | `200`, `{"id": 3, "status": "COMPLETED", "predicted_label": "A005", "confidence": 0.9576}` |
+| 있는 기록 조회 (`FAILED`) | `200`, `predicted_label`·`confidence`가 `null` |
+| 없는 id (`99999`) | `404` |
+| 숫자가 아닌 id (`abc`) | `404` |
+| 실제 영상 POST 후 그 `id`로 GET | POST와 GET 모두 `A005`, `0.9576` |
+| GET 결과와 DB 테이블(`analyses_inferencerecord`) 비교 | 값이 같다 |
+| 화면에서 실제 영상 업로드 (A005) | `예측 동작: A005 (신뢰도 95.8%)` |
+| Network 요청 | `analyze/` POST 1번, `analyze/{id}/` GET 1번 |
+| 화면에서 사람 없는 영상 업로드 | `분석에 실패했습니다.` |
+| FastAPI를 끄고 화면에서 업로드 | `요청 실패 (502): AI 서버 연결 실패: ...` (화면이 멈추지 않음) |

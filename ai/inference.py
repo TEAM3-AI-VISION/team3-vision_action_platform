@@ -70,7 +70,7 @@ def load_models() -> dict:
         raise ValueError("action_model.joblib 과 feature_columns.json·training_info.json 이 맞지 않습니다.")
 
     d = torch.load(MODELS / info["ensemble"]["cnn_file"], map_location="cpu", weights_only=True)
-    cnns = []
+    cnns = []                                                  # 1D-CNN 은 난수만 바꿔 3번 학습 → 3개 확률을 평균
     for state in d["state_dicts"]:
         m = CNN(2 * d["n_frame"], d["n_cls"], w=d["width"])
         m.load_state_dict(state)
@@ -78,7 +78,7 @@ def load_models() -> dict:
 
     return {"info": info, "trees": trees, "cnns": cnns, "mu": d["mu"].numpy(), "sd": d["sd"].numpy(),
             "pose": YOLO(str(MODELS / "yolo11m-pose.pt")),
-            "device": 0 if torch.cuda.is_available() else "cpu"}
+            "device": 0 if torch.cuda.is_available() else "cpu"}     # GPU 가 있으면 0번 GPU, 없으면 CPU
 
 
 # ---------------------------------------------------------------- 2. 관절 → 특징 40개
@@ -122,7 +122,7 @@ def extract_people(video_path: str, m: dict) -> tuple[dict, dict]:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     if fps != fps or fps > 240:
         fps = 30.0
-    step = max(1, round(fps / MAX_PROCESS_FPS))
+    step = max(1, round(fps / MAX_PROCESS_FPS))                 # 60fps 영상은 2장 중 1장만 → 처리 시간 절반
     people: dict[int, dict] = {}
     n = used = w = h = 0
     while n < MAX_VIDEO_SECONDS * fps:
@@ -134,15 +134,16 @@ def extract_people(video_path: str, m: dict) -> tuple[dict, dict]:
             continue
         used += 1
         h, w = frame.shape[:2]
+        # persist: 두 번째 Frame 부터는 앞 Frame 의 사람 번호를 이어 받는다 (ByteTrack)
         r = m["pose"].track(source=frame, persist=used > 1, tracker="bytetrack.yaml", imgsz=IMAGE_SIZE,
                             conf=PERSON_CONF, device=m["device"], verbose=False)[0]
         if r.boxes is None or r.boxes.id is None or r.keypoints is None:
-            continue
+            continue                                            # 이 Frame 에는 사람이 없음
         for tid, xy, conf in zip(r.boxes.id.int().tolist(), r.keypoints.xy.cpu().numpy(),
                                  r.keypoints.conf.cpu().numpy()):
             values, valid = frame_features(xy, w, h)
             p = people.setdefault(int(tid), {"t": [], "x": [], "ok": [], "conf": []})
-            p["t"].append((n - 1) / fps)
+            p["t"].append((n - 1) / fps)                          # 이 Frame 의 시간(초)
             p["x"].append(values)
             p["ok"].append(valid)
             p["conf"].append(float(np.mean(conf)))
@@ -166,7 +167,7 @@ def predict_proba(seq: np.ndarray, m: dict) -> np.ndarray:
     v = np.diff(s, axis=1, prepend=s[:, :1])
     c = np.concatenate([s, v], 2).transpose(0, 2, 1).astype(np.float32)
     with torch.no_grad():
-        t = torch.tensor((c - m["mu"]) / m["sd"])
+        t = torch.tensor((c - m["mu"]) / m["sd"])             # 학습 때 평균·표준편차로 크기를 맞춤
         p_cnn = np.mean([torch.softmax(net(t), 1).numpy() for net in m["cnns"]], 0)
     return ((p_trees + p_cnn) / 2)[0]
 
@@ -345,7 +346,7 @@ def predict_person(p: dict, m: dict) -> dict:
     info = m["info"]
     steps, rule = info["sequence_steps"], info["valid_frame_rule"]
     t, x, ok = np.asarray(p["t"]), np.stack(p["x"]), np.asarray(p["ok"])
-    span = float(t[-1] - t[0]) if len(t) > 1 else 0.0
+    span = float(t[-1] - t[0]) if len(t) > 1 else 0.0           # 이 사람이 화면에 보인 시간(초)
     quality = {"frames": len(t), "valid_frames": int(ok.sum()), "track_seconds": round(span, 2),
                "mean_keypoint_conf": round(float(np.mean(p["conf"])), 3)}
     if span < MIN_TRACK_SECONDS:
@@ -370,11 +371,11 @@ def predict_person(p: dict, m: dict) -> dict:
         grid = np.linspace(0.0, 1.0, steps)                # 창 길이와 상관없이 30단계로 고르게
         u = (ts - ts[0]) / (ts[-1] - ts[0])
         seq = np.stack([np.interp(grid, u, xs[:, j]) for j in range(40)], 1).reshape(1, -1)
-        probs.append(predict_proba(seq, m))
+        probs.append(predict_proba(seq, m))                    # 창 하나 → 17동작 확률
     if not probs:
         return {"skipped": True, "reason": "관절이 잘 보이는 Frame 이 부족함", **quality}
 
-    mean_p = np.mean(probs, axis=0)
+    mean_p = np.mean(probs, axis=0)                            # 창이 여러 개면 평균 → 1등·top3
     order = np.argsort(mean_p)[::-1]
     classes, names = info["classes"], info["class_info"]
 
@@ -395,7 +396,7 @@ def predict_video(video_path: str) -> dict:
     m = load_models()
     people, video = extract_people(video_path, m)
     predictions, skipped = [], []
-    for tid in sorted(people):
+    for tid in sorted(people):                                 # 사람마다 따로 판단, 못 한 사람은 skipped 로
         r = predict_person(people[tid], m)
         (skipped if r.pop("skipped") else predictions).append({"track_id": tid, **r})
     if not people:

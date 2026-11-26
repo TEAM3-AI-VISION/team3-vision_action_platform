@@ -21,4 +21,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # STEP 3: /analyses/ 로 시작하는 주소는 analyses/urls.py 가 처리한다
     path('analyses/', include('analyses.urls')),
+    # STEP 4: /api/v1/ 로 시작하는 주소는 analyses/api_urls.py 가 처리한다
+    path('api/v1/', include('analyses.api_urls')),
 ]

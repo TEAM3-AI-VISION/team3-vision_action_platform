@@ -10,10 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# STEP 5: backend/.env 파일의 값(DB 접속 정보 등)을 환경변수로 읽어온다.
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -37,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',  # STEP 4: DRF(Django REST Framework) 등록
     'analyses',  # STEP 3: 우리가 만든 앱 등록
 ]
 
@@ -74,10 +81,16 @@ WSGI_APPLICATION = 'project.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+# STEP 5: SQLite → PostgreSQL
+# 접속 정보는 코드에 직접 쓰지 않고 backend/.env 에서 읽는다. (.env.example 참고)
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('DB_NAME'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+        'HOST': os.getenv('DB_HOST', 'localhost'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
 
@@ -121,6 +134,11 @@ STATIC_URL = 'static/'
 # STEP 3: frontend/ 폴더의 JS·CSS를 /static/ 주소로 내보낸다
 # 예) frontend/analyze.js → http://localhost:8000/static/analyze.js
 STATICFILES_DIRS = [BASE_DIR / 'frontend']
+
+# STEP 5: 업로드한 영상 파일을 저장할 위치
+# 예) InferenceRecord.video_file → backend/media/videos/파일명.mp4
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 
 # Email

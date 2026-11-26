@@ -1,6 +1,6 @@
 """무인 상점 이상행동 17동작 추론: MP4 한 개 → 사람별 동작·확률
 
-1. 영상의 Frame 마다 사람별 관절 17개 찾기 (YOLO Pose, 사람 번호는 ByteTrack)
+1. Frame 마다 사람별 관절 17개 (YOLO Pose, 사람 번호는 ByteTrack)
 2. 관절 → 값 40개
 3. 8초씩 잘라 30칸으로 맞춤 → 값 2,646개
 4. ExtraTrees 확률과 1D-CNN 확률의 평균 → 17동작 확률
@@ -11,6 +11,7 @@
 """
 import json
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,7 +30,6 @@ STRIDE = 4.0        # 긴 영상은 4초씩 밀며 여러 창
 UNCERTAIN = 0.3     # 1등 확률이 이보다 낮으면 불확실
 
 
-# ---------------------------------------------------------------- 모델 불러오기
 class CNN(nn.Module):
     """1D-CNN: (값 40 + 변화량 40, 30칸) → 17동작. 층 순서가 저장된 가중치와 같아야 한다."""
 
@@ -55,12 +55,11 @@ def load_models():
         net = CNN(2 * d["n_frame"], d["n_cls"], d["width"])
         net.load_state_dict(state)
         cnns.append(net.eval())
-    info = json.loads((MODELS / "training_info.json").read_text(encoding="utf-8"))
     trees = joblib.load(MODELS / "action_model.joblib")
+    names = json.loads((MODELS / "training_info.json").read_text(encoding="utf-8"))["class_info"]
     return {"pose": YOLO(str(MODELS / "yolo11m-pose.pt")), "trees": trees, "cnns": cnns,
             "mu": d["mu"].numpy(), "sd": d["sd"].numpy(),
-            "classes": [str(c) for c in trees.classes_],
-            "names": {k: v["name_ko"] for k, v in info["class_info"].items()}}
+            "actions": [(str(c), names[str(c)]["name_ko"]) for c in trees.classes_]}   # (번호, 이름) 17개
 
 
 # ---------------------------------------------------------------- 1·2. 영상 → 사람별 값 40개
@@ -123,27 +122,15 @@ def motion_summary(s):
     f = np.asarray(s, dtype=np.float32)
     tc = f[:, :34].reshape(30, 17, 2)
     tc = tc / np.maximum(np.linalg.norm((tc[:, 5] + tc[:, 6]) / 2.0, axis=1), 0.40)[:, None, None]
-    x, y = tc[..., 0], tc[..., 1]                               # (30칸, 관절 17)
-    elb, knee = (f[:, 34] + f[:, 35]) / 2.0, (f[:, 36] + f[:, 37]) / 2.0
-    knee_lo, knee_hi = np.minimum(f[:, 36], f[:, 37]), np.maximum(f[:, 36], f[:, 37])
-    sx, sy = (x[:, 5] + x[:, 6]) / 2.0, (y[:, 5] + y[:, 6]) / 2.0   # 어깨 가운데
-    tilt = np.degrees(np.arctan2(np.abs(sx), np.maximum(-sy, 1e-3)))  # 상체 기울기
-    ny = y[:, 0]                                                # 코 높이
-    lwx, lwy, rwx, rwy = x[:, 9], y[:, 9], x[:, 10], y[:, 10]   # 왼손목·오른손목
-    wx, wy = (lwx + rwx) / 2.0, (lwy + rwy) / 2.0
-    ay, ky = (y[:, 15] + y[:, 16]) / 2.0, (y[:, 13] + y[:, 14]) / 2.0   # 발목·무릎 가운데 높이
-    d = np.diff(tc, axis=0)
-    def speed(j): return np.linalg.norm(d[:, j], axis=1)
-    hand_v, foot_v = np.maximum(speed(9), speed(10)), np.maximum(speed(15), speed(16))
-    de, dwy = np.diff(elb), np.diff(wy)
-    slam = wy[3:] - wy[:-3]                                     # 3칸 동안 두 손이 확 내려감 (샷건)
-    wh = np.ptp(x, 1) / np.maximum(np.ptp(y, 1), 0.2)           # 몸 가로 ÷ 세로 (누우면 커짐)
-    shw = np.hypot(x[:, 5] - x[:, 6], y[:, 5] - y[:, 6])        # 어깨 폭
-    hand_gap = np.hypot(lwx - rwx, lwy - rwy)
+    x, y = tc[..., 0], tc[..., 1]                               # (30칸, 관절 17). 관절 번호는 COCO
 
+    def mid(v, a, b): return (v[:, a] + v[:, b]) / 2.0          # 두 관절의 가운데
+    def dy(a, b): return np.abs(y[:, a] - y[:, b])              # 두 관절의 높이 차
+    def dist(a, b): return np.hypot(x[:, a] - x[:, b], y[:, a] - y[:, b])
+    def speed(j): return np.linalg.norm(np.diff(tc[:, j], axis=0), axis=1)
     def stat4(v): return [v.min(), v.max(), v.mean(), np.ptp(v)]
     def turns(dv, th): return int(np.sum(dv[:-1] * dv[1:] < -th))    # 방향이 바뀐 횟수
-    def change(v): return [np.mean(v[10:20]) - np.mean(v[:5]), np.mean(v[24:]) - np.mean(v[:5])]
+    def change(v): return [np.mean(v[10:20]) - np.mean(v[:5]), np.mean(v[24:]) - np.mean(v[:5])]  # 처음 → 중간·끝
 
     def hands(l, r):                                            # 더 움직인 손, 덜 움직인 손, 비율
         a, b = max(float(np.ptp(l)), float(np.ptp(r))), min(float(np.ptp(l)), float(np.ptp(r)))
@@ -152,31 +139,38 @@ def motion_summary(s):
     def corr(a, b):                                             # 두 손이 같이 움직이는 정도
         return float(np.corrcoef(a, b)[0, 1]) if np.std(a) > 1e-3 and np.std(b) > 1e-3 else 0.0
 
+    elb, knee = mid(f, 34, 35), mid(f, 36, 37)                  # 팔꿈치·무릎 각도 (좌우 평균)
+    knee_lo, knee_hi = np.minimum(f[:, 36], f[:, 37]), np.maximum(f[:, 36], f[:, 37])
+    sx, sy = mid(x, 5, 6), mid(y, 5, 6)                         # 어깨 가운데
+    wx, wy = mid(x, 9, 10), mid(y, 9, 10)                       # 두 손목 가운데
+    lwx, lwy, rwx, rwy = x[:, 9], y[:, 9], x[:, 10], y[:, 10]
+    ny, ay = y[:, 0], mid(y, 15, 16)                            # 코·발목 높이
+    tilt = np.degrees(np.arctan2(np.abs(sx), np.maximum(-sy, 1e-3)))    # 상체 기울기
+    wh = np.ptp(x, 1) / np.maximum(np.ptp(y, 1), 0.2)           # 몸 가로 ÷ 세로 (누우면 커짐)
+    hand_v, foot_v = np.maximum(speed(9), speed(10)), np.maximum(speed(15), speed(16))
+    de, dwy = np.diff(elb), np.diff(wy)
+    slam = wy[3:] - wy[:-3]                                     # 3칸 동안 두 손이 확 내려감 (샷건)
+
     feats = [
         # 팔꿈치 (12)
         elb.min(), elb.max(), elb.mean(), elb.std(),
-        np.minimum(f[:, 34], f[:, 35]).min(), np.maximum(f[:, 34], f[:, 35]).max(),
-        np.abs(de).sum(), np.abs(de).max(),
+        np.minimum(f[:, 34], f[:, 35]).min(), np.maximum(f[:, 34], f[:, 35]).max(), np.abs(de).sum(), np.abs(de).max(),
         len(find_peaks(elb, prominence=12.0, height=95.0)[0]), len(find_peaks(-elb, prominence=12.0)[0]),
         turns(de, 4.0), np.sum(elb > 110.0),
         # 무릎·발목 (14)
         knee_lo.min(), np.percentile(knee_lo, 10), knee.mean(), knee.std(), np.median(knee_hi), (knee_hi - knee_lo).max(),
-        *stat4(ay), np.minimum(y[:, 15], y[:, 16]).min(), np.abs(y[:, 15] - y[:, 16]).max(),
-        np.hypot(x[:, 15] - x[:, 16], y[:, 15] - y[:, 16]).max(), np.abs(y[:, 13] - y[:, 14]).max(),
+        *stat4(ay), np.minimum(y[:, 15], y[:, 16]).min(), dy(15, 16).max(), dist(15, 16).max(), dy(13, 14).max(),
         # 손목 (24)
         *stat4(wy), np.ptp(wx), wx.std(), *hands(lwy, rwy), *hands(lwx, rwx), corr(lwy, rwy), corr(lwx, rwx),
-        np.minimum(lwy - sy, rwy - sy).min(), np.maximum(lwy - sy, rwy - sy).min(), np.maximum(lwy, rwy).max(),
-        hand_gap.min(), hand_gap.max(), turns(dwy, 0.002),
-        (wy - ny).min(), (np.minimum(lwy, rwy) - ny).min(), slam.max(), slam.min(),
+        np.minimum(lwy - sy, rwy - sy).min(), np.maximum(lwy - sy, rwy - sy).min(), np.maximum(lwy, rwy).max(), dist(9, 10).min(), dist(9, 10).max(),
+        turns(dwy, 0.002), (wy - ny).min(), (np.minimum(lwy, rwy) - ny).min(), slam.max(), slam.min(),
         # 머리·상체 기울기·몸 비율·속도 (26)
         *stat4(ny), np.ptp(x[:, 0]), (ny - sy).max(), tilt.max(), np.percentile(tilt, 85), tilt.mean(),
         wh.max(), np.percentile(wh, 85), wh.min(), hand_v.max(), hand_v.mean(), foot_v.max(), foot_v.mean(),
-        speed(0).max(), dwy.max(),
-        np.abs(y[:, 5] - y[:, 6]).max(), np.abs(y[:, 5] - y[:, 6]).mean(),       # 어깨 좌우 높이 차
-        np.abs(y[:, 11] - y[:, 12]).max(), np.abs(y[:, 11] - y[:, 12]).mean(),   # 골반 좌우 높이 차
-        np.abs(y[:, 3] - y[:, 4]).max(), shw.min(), shw.max(), np.ptp(sx),
+        speed(0).max(), dwy.max(), dy(5, 6).max(), dy(5, 6).mean(), dy(11, 12).max(), dy(11, 12).mean(),
+        dy(3, 4).max(), dist(5, 6).min(), dist(5, 6).max(), np.ptp(sx),
         # 처음 → 중간·끝 자세 변화 (10)
-        *change(ny), *change(ay), *change(knee), *change(tilt), np.mean(ky[10:20]), np.abs(sx).max(),
+        *change(ny), *change(ay), *change(knee), *change(tilt), np.mean(mid(y, 13, 14)[10:20]), np.abs(sx).max(),
     ]
     return np.nan_to_num(np.asarray(feats, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -202,14 +196,11 @@ def predict_person(track, m):
     t, x, usable, conf = map(np.array, zip(*track))
     if t[-1] - t[0] < 1.0 or round(conf.mean(), 3) < 0.4:   # 1초도 안 보였거나, 관절이 흐릿함(의자·가방)
         return None
-    if t[-1] - t[0] <= WINDOW:                                  # 8초 이하면 통째로 창 하나
-        windows = [(t[0], t[-1])]
-    else:                                                       # 길면 4초씩 밀며, 마지막 창은 끝에 맞춤
-        starts = list(np.arange(t[0], t[-1] - WINDOW, STRIDE)) + [t[-1] - WINDOW]
-        windows = [(float(a), float(a) + WINDOW) for a in starts]
+    # 8초 이하면 창 하나, 길면 4초씩 밀며 여러 창 (마지막 창은 끝에 맞춤)
+    starts = [t[0]] if t[-1] - t[0] <= WINDOW else [*np.arange(t[0], t[-1] - WINDOW, STRIDE), t[-1] - WINDOW]
     probs = []
-    for a, b in windows:
-        inside = (t >= a - 1e-9) & (t <= b + 1e-9)
+    for a in starts:
+        inside = (t >= a - 1e-9) & (t <= a + WINDOW + 1e-9)
         sel = inside & usable
         if sel.sum() < 10 or sel.sum() / inside.sum() < 0.5:   # 쓸 수 있는 Frame 이 적은 창은 버림
             continue
@@ -222,6 +213,7 @@ def predict_person(track, m):
 
 # ---------------------------------------------------------------- 5. 영상 하나 → 결과
 def predict_video(path):
+    started = time.perf_counter()
     m = load_models()
     people = track_people(path, m)
     predictions = []
@@ -229,19 +221,17 @@ def predict_video(path):
         p = predict_person(track, m)
         if p is None:
             continue
-        top3 = [{"action_id": m["classes"][i], "action_name_ko": m["names"][m["classes"][i]],
+        top3 = [{"action_id": m["actions"][i][0], "action_name_ko": m["actions"][i][1],
                  "probability": round(float(p[i]), 4)} for i in np.argsort(p)[::-1][:3]]
         best = top3[0]
         predictions.append({"track_id": tid, "action_id": best["action_id"], "action_name_ko": best["action_name_ko"],
                             "confidence": best["probability"], "uncertain": best["probability"] < UNCERTAIN,
                             "top3": top3})
-    if not people:
-        message = "영상에서 사람을 찾지 못했습니다."
-    elif not predictions:
-        message = "사람은 보였지만 동작을 판단하지 못했습니다."
-    else:
-        message = ""
-    return {"message": message, "predictions": predictions}
+    message = ""
+    if not predictions:
+        message = "사람은 보였지만 동작을 판단하지 못했습니다." if people else "영상에서 사람을 찾지 못했습니다."
+    return {"message": message, "processing_seconds": round(time.perf_counter() - started, 2),   # GPU 약 5초, CPU 약 32초 (7초 영상)
+            "predictions": predictions}
 
 
 if __name__ == "__main__":

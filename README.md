@@ -192,6 +192,7 @@ uvicorn main:app --port 8001          # FastAPI (http://localhost:8001/docs)
 | `uncertain` | `confidence`가 0.3보다 낮으면 `true` |
 | `top3` | 확률이 높은 동작 3개 |
 | `message` | 정상이면 `""`, 사람을 못 찾았거나 판단을 못 하면 그 이유 |
+| `processing_seconds` | 처리에 걸린 시간(초). 7초 영상이 GPU 약 5초, CPU 약 32초 |
 
 | 요청 | 응답 |
 |---|---|

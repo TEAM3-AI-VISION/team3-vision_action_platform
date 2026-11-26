@@ -1,0 +1,9 @@
+# 강사님 6일차 모델(rf_action_baseline.joblib)을 만든 환경과 같은 버전 — 다르면 joblib 이 못 열리거나 결과가 달라질 수 있음
+scikit-learn==1.9.1
+numpy==2.5.4
+joblib==1.6.0
+ultralytics==8.4.203
+opencv-python-headless>=4.10
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9

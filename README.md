@@ -370,3 +370,51 @@ GET /api/v1/analyze/3/
 | Network 요청 | `analyze/` POST 1번, `analyze/{id}/` GET 1번 |
 | 화면에서 사람 없는 영상 업로드 | `분석에 실패했습니다.` |
 | FastAPI를 끄고 화면에서 업로드 | `요청 실패 (502): AI 서버 연결 실패: ...` (화면이 멈추지 않음) |
+
+## STEP 10: 기능 파이프라인 추적
+
+### C1: 모델 로딩 → 영상 전처리 → 추론 (`ai/inference.py`)
+
+실선은 호출(넘기는 값), 점선은 반환(돌려받는 값). 괄호 안 숫자는 `sample.mp4`(6.9초, 30fps, 1080×1920, 1명)를 실제로 넣었을 때의 값.
+
+```mermaid
+flowchart TD
+    MAIN["ai/main.py<br/>predict_video(video)"]
+
+    subgraph INF["ai/inference.py"]
+        PV["predict_video(path)"]
+        LM["load_models()<br/>@lru_cache: 처음 한 번만 읽음"]
+        TP["track_people(path, models)<br/>YOLO Pose + ByteTrack"]
+        FV["frame_values(kp, w, h)"]
+        PP["predict_person(track, models)"]
+        PR["predict_proba(seq, models)"]
+        MS["motion_summary(seq)"]
+    end
+
+    MAIN -->|"임시 MP4 경로"| PV
+    PV --> LM
+    LM -.->|"YOLO · ExtraTrees · 1D-CNN 3개"| PV
+    PV -->|"경로"| TP
+    TP -->|"한 사람의 관절 17개 (x, y)"| FV
+    FV -.->|"특징값 40개, usable"| TP
+    TP -.->|"사람 번호별 Frame 목록 (1명 × 104장)"| PV
+    PV -->|"한 사람 목록"| PP
+    PP -->|"8초 창 → 30-step × 40"| PR
+    PR -->|"30-step × 38"| MS
+    MS -.->|"움직임 요약 86개"| PR
+    PR -.->|"17동작 확률"| PP
+    PP -.->|"창 평균 17동작 확률 또는 None"| PV
+    PV -.->|"dict: message · processing_seconds · predictions"| MAIN
+```
+
+| 함수 | ① 누가 부르나 | ② 다음에 부르는 것 | ③ 받는 것 → 돌려주는 것 (`sample.mp4`) |
+|---|---|---|---|
+| `predict_video(path)` | `ai/main.py` `predict_video()` | `load_models()` → `track_people()` → 사람마다 `predict_person()` | MP4 경로 → `{message, processing_seconds, predictions}`. 사람마다 1등·top3, 0.3 미만이면 `uncertain` (`A001` 키오스크 두드리기 0.6746, GPU 약 3초) |
+| `load_models()` | `predict_video()` | `torch.load()`, `joblib.load()`, `YOLO()` | 없음 → `{pose, trees, cnns, mu, sd, ids}`. 두 번째 요청부터는 읽어 둔 것을 그대로 씀 |
+| `track_people(path, models)` | `predict_video()` | `models["pose"].track()`, `frame_values()` | MP4 경로 → `{track_id: [(시간, 특징값 40, usable, 관절 conf), ...]}`. 1초에 15장만 봄 (208장 중 104장, 1명). 영상을 못 열면 `ValueError` |
+| `frame_values(kp, w, h)` | `track_people()` | 없음 | 관절 17 × (x, y) px → 특징값 40개 (몸 크기로 정규화한 좌표 34 + 팔꿈치·무릎 각도 4 + 골반 위치 2), `usable` |
+| `predict_person(track, models)` | `predict_video()` | `np.interp()`, `predict_proba()` | 한 사람 목록 → 8초 Sliding Window 마다 30-step Sequence 로 리샘플링 → 창 평균 17동작 확률 (6.9초라 창 1개). 1초 미만이거나 관절 conf 평균 0.4 미만이면 `None` |
+| `predict_proba(seq, models)` | `predict_person()` | `motion_summary()`, `models["trees"].predict_proba()`, `models["cnns"]` 3개 | 30 × 40 → ExtraTrees 는 특징값 2,646개, 1D-CNN 은 30 × (40 + 변화량 40) → 두 확률 평균 17개 |
+| `motion_summary(seq)` | `predict_proba()` | 없음 | 30 × 38 (좌표 34 + 각도 4) → 움직임 요약 86개 |
+
+오류: 영상을 못 열거나 Frame 이 없으면 `ValueError` → `ai/main.py`가 `422`로 바꾼다. 사람을 못 찾거나 판단하지 못하면 오류가 아니라 빈 `predictions`와 `message`(예: "영상에서 사람을 찾지 못했습니다.")를 돌려주고, Django가 `FAILED`로 저장한다.

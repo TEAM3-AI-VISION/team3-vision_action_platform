@@ -150,3 +150,88 @@ STEP 4까지의 내용 중 STEP 5에서 코드가 바뀐 부분이다.
 | `/api/v1/analyze/` 응답 | `{"filename", "size"}` | `{"id", "status", "filename", "size"}` |
 | `requirements.txt` | Django, DRF | + `psycopg[binary]`, `python-dotenv` |
 | 실행 준비 | `pip install` 후 바로 `runserver` | `.env` 작성 → `migrate` → `runserver` |
+
+## STEP 8: Django ↔ FastAPI 연결
+
+상태: ✅ 완료 (B1 + C2)
+
+### 요약
+
+- `views.analyze`가 기록을 저장한 뒤, 저장한 영상을 `requests.post()`로 FastAPI `POST /predict/video`에 보낸다.
+- FastAPI가 돌려준 사람별 결과 중 **신뢰도 1등**의 `action_id`와 `confidence`를 `InferenceRecord`에 저장하고 상태를 `COMPLETED`로 바꾼다.
+- FastAPI 연결 실패·시간 초과(120초)·오류 응답·사람 없음이면 `FAILED`로 저장하고 예측값은 비워 둔다.
+
+```
+analyze.js fetch POST
+ → views.analyze
+ → InferenceRecord 저장 (RECEIVED)
+ → requests.post(FASTAPI_URL + '/predict/video', files={'video': ...}, timeout=120)
+ → FastAPI: YOLO Pose → 모델 추론 → 사람별 결과 JSON
+ → 신뢰도 1등 → predicted_label·confidence 저장 (COMPLETED) / 실패 시 FAILED
+ → {"id", "status", "filename", "size", "predicted_label", "confidence", "message"}
+```
+
+### Django ↔ FastAPI 약속
+
+| 항목 | 값 |
+|---|---|
+| FastAPI 주소 | `http://localhost:8001` (`backend/.env`의 `FASTAPI_URL`) |
+| 엔드포인트 | `POST /predict/video` (`ai/main.py`) |
+| 파일 필드 이름 | `video` (`.mp4`만) |
+| 저장할 결과 | 신뢰도가 가장 높은 사람 1명 (`predictions`는 `track_id` 순서라 `[0]`이 1등이 아님) |
+| `predicted_label` | `action_id` (예: `A005`) |
+| 상태 | `RECEIVED` → `COMPLETED` / `FAILED` |
+| 타임아웃 | 120초 |
+
+### 성공·실패 판단
+
+| FastAPI 결과 | 상태 | 예측값 |
+|---|---|---|
+| 200 + `predictions` 1개 이상 | `COMPLETED` | 1등의 `action_id`, `confidence` |
+| 200 + `predictions` 빈 리스트 (사람 없음·판단 불가) | `FAILED` | 비움 |
+| 400 / 422 / 500 | `FAILED` | 비움 |
+| 연결 실패·120초 초과 | `FAILED` (Django 응답 `502`) | 비움 |
+
+### 실행 (터미널 2개)
+
+```bash
+# 1) FastAPI (포트 8001)
+cd ai
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --port 8001
+```
+
+```bash
+# 2) Django (포트 8000)
+cd backend
+source venv/bin/activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py runserver
+```
+
+- `backend/.env`에 `FASTAPI_URL=http://localhost:8001`을 추가한다. (`.env.example` 참고)
+- 추론은 동기 방식이라 영상이 길면 응답이 오래 걸린다. 테스트는 10~15초 이하 영상으로 한다.
+
+### 검증 결과
+
+| 테스트 | 결과 |
+|---|---|
+| 정상 영상 (A005 밀치기, 3.3초) | `200`, `COMPLETED`, `predicted_label=A005`, `confidence=0.9576` |
+| 같은 영상을 FastAPI에 직접 요청 | `A005`, `0.9576`로 DB 값과 동일 |
+| 사람 없는 영상 (회색 화면 5초) | `200`, `FAILED`, 예측값 없음, `message: 영상에서 사람을 찾지 못했습니다.` |
+| FastAPI에 연결 불가 | `502`, `FAILED`, Django는 계속 동작 |
+
+### STEP 8에서 바뀐 부분
+
+STEP 5까지의 내용 중 STEP 8에서 코드가 바뀐 부분이다.
+
+| 항목 | STEP 5 | STEP 8 |
+|---|---|---|
+| `status` 값 | `RECEIVED` | `RECEIVED`, `COMPLETED`, `FAILED` (마이그레이션 `0002`) |
+| `predicted_label`, `confidence` | 항상 빈 값 | 성공 시 FastAPI가 준 실제 값 |
+| `/api/v1/analyze/` 응답 | `{"id", "status", "filename", "size"}` | + `predicted_label`, `confidence`, `message` (연결 실패 시 `502`와 `error`) |
+| `requirements.txt` | Django, DRF, psycopg, python-dotenv | + `requests` |
+| `.env` | DB 접속 정보 | + `FASTAPI_URL` |

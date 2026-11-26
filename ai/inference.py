@@ -1,8 +1,8 @@
 """무인 상점 이상행동 17동작 추론: MP4 한 개 → 사람별 동작·확률
 
-1. Frame 마다 사람별 관절 17개 (YOLO Pose, 사람 번호는 ByteTrack)
-2. 관절 → 값 40개
-3. 8초씩 잘라 30칸으로 맞춤 → 값 2,646개
+1. Frame 마다 사람별 관절(Keypoint) 17개 (YOLO Pose, 사람 추적은 ByteTrack)
+2. 관절 좌표 정규화 → 특징값(Feature) 40개
+3. 8초 Sliding Window → 30-step Sequence 로 리샘플링 → 특징값 2,646개
 4. ExtraTrees 확률과 1D-CNN 확률의 평균 → 17동작 확률
 5. 사람별 1등·top3
 
@@ -24,8 +24,8 @@ from torch import nn
 from ultralytics import YOLO
 
 MODEL_DIR = Path(__file__).parent / "models"
-STEPS = 30          # 창 하나를 30칸으로
-WINDOW = 8.0        # 창 길이(초). 학습 영상 중간값 5.4초 → 동작 하나가 들어간다
+STEPS = 30          # 창 하나를 30-step Sequence 로 리샘플링
+WINDOW = 8.0        # Sliding Window 길이(초). 학습 영상 중간값 5.4초 → 동작 하나가 들어간다
 STRIDE = 4.0        # 긴 영상은 4초씩 밀며 여러 창
 UNCERTAIN = 0.3     # 1등 확률이 이보다 낮으면 불확실
 PROCESS_FPS = 15    # 1초에 15장만 관절을 찾는다. 30장과 1등이 같고(영상 84개) 시간은 절반
@@ -38,7 +38,7 @@ ACTIONS = {
 
 
 class CNN(nn.Module):
-    """1D-CNN: (값 40 + 변화량 40, 30칸) → 17동작. 층 순서가 저장된 가중치와 같아야 한다."""
+    """1D-CNN: (값 40 + 변화량 40, 30-step) → 17동작. 층 순서가 저장된 가중치와 같아야 한다."""
 
     def __init__(self, c_in, n_cls, w):
         super().__init__()
@@ -64,14 +64,14 @@ def load_models():
         cnns.append(net.eval())
     trees = joblib.load(MODEL_DIR / "action_model.joblib")
     return {"pose": YOLO(str(MODEL_DIR / "yolo11m-pose.pt")), "trees": trees, "cnns": cnns,
-            "mu": ckpt["mu"].numpy(), "sd": ckpt["sd"].numpy(),       # CNN 입력 크기를 맞출 학습 때 평균·표준편차
+            "mu": ckpt["mu"].numpy(), "sd": ckpt["sd"].numpy(),       # CNN 입력 정규화용 학습 때 평균·표준편차
             "ids": [str(c) for c in trees.classes_]}                  # 확률 순서 = A001 ~ A017
 
 
-# ---------------------------------------------------------------- 1·2. 영상 → 사람별 값 40개
+# ---------------------------------------------------------------- 1·2. 영상 → 사람별 특징값 40개
 def frame_values(kp, w, h):
-    """관절 17개 (x, y px) → 값 40개, 쓸 수 있는 Frame 인지
-    34 = 골반 중심 기준 좌표 ÷ 몸 크기 (카메라와 멀든 가깝든 같은 값)
+    """관절 17개 (x, y px) → 특징값 40개, 쓸 수 있는 Frame 인지
+    34 = 골반 중심 기준 좌표 ÷ 몸 크기 (정규화: 카메라와 멀든 가깝든 같은 값)
      4 = 팔꿈치·무릎 각도
      2 = 골반의 화면 위치 0~1 (넘어지면 아래로)
     """
@@ -92,7 +92,7 @@ def frame_values(kp, w, h):
 
 
 def track_people(path, models):
-    """영상 → {사람 번호: [(시간, 값 40개, 쓸 수 있나, 관절 Confidence 평균), ...]}"""
+    """영상 → {사람 번호: [(시간, 특징값 40개, 쓸 수 있나, 관절 Confidence 평균), ...]}"""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise ValueError("영상 파일을 열 수 없습니다.")
@@ -125,13 +125,13 @@ def track_people(path, models):
 
 # ---------------------------------------------------------------- 3·4. 값 → 17동작 확률
 def motion_summary(seq):
-    """30칸 × 38 (좌표 34 + 각도 4) → 움직임 요약 86개
+    """30-step × 38 (좌표 34 + 각도 4) → 움직임 요약 86개
     두 손이 같이 움직이는지, 팔을 몇 번 폈다 굽혔는지, 손이 코 위로 갔는지, 몸이 기우는지 같은 것.
     """
     seq = np.asarray(seq, dtype=np.float32)
     body = seq[:, :34].reshape(30, 17, 2)
     body = body / np.maximum(np.linalg.norm((body[:, 5] + body[:, 6]) / 2.0, axis=1), 0.40)[:, None, None]  # 몸 크기로 한 번 더
-    x, y = body[..., 0], body[..., 1]                           # (30칸, 관절 17). 관절 번호는 COCO
+    x, y = body[..., 0], body[..., 1]                           # (30-step, 관절 17). 관절 번호는 COCO
 
     def mid(v, a, b): return (v[:, a] + v[:, b]) / 2.0          # 두 관절의 가운데
     def dy(a, b): return np.abs(y[:, a] - y[:, b])              # 두 관절의 높이 차
@@ -188,14 +188,14 @@ def motion_summary(seq):
 
 
 def predict_proba(seq, models):
-    """30칸 × 40 → 17동작 확률"""
+    """30-step × 40 → 17동작 확률"""
     seq = seq[None]                                             # (1, 30, 40)
     lo, hi = seq.min(1), seq.max(1)
     # ExtraTrees 입력 2,646 = 값 1,200 + 변화량 1,160 + 평균·표준편차·최소·최대·범위 200 + 움직임 요약 86
     features = np.hstack([seq.reshape(1, -1), np.diff(seq, axis=1).reshape(1, -1), seq.mean(1), seq.std(1),
                           lo, hi, hi - lo, motion_summary(seq[0, :, :38])[None]])
     p_trees = models["trees"].predict_proba(features)
-    # 1D-CNN 입력: 값 40 + 변화량 40 채널, 30칸
+    # 1D-CNN 입력: 값 40 + 변화량 40 채널, 30-step
     cnn_in = np.concatenate([seq, np.diff(seq, axis=1, prepend=seq[:, :1])], 2).transpose(0, 2, 1).astype(np.float32)
     with torch.no_grad():
         x = torch.tensor((cnn_in - models["mu"]) / models["sd"])
@@ -220,7 +220,7 @@ def predict_person(track, models):
         if good.sum() < 10 or good.sum() / inside.sum() < 0.5:   # 쓸 수 있는 Frame 이 10장 미만·절반 미만이면 버림
             continue
         t, v = times[good], values[good]
-        pos = (t - t[0]) / (t[-1] - t[0])                       # 창 안의 위치 0~1 → 30칸으로 고르게
+        pos = (t - t[0]) / (t[-1] - t[0])                       # 창 안의 위치 0~1 → 30-step 으로 고르게 리샘플링
         seq = np.stack([np.interp(np.linspace(0.0, 1.0, STEPS), pos, v[:, j]) for j in range(40)], 1)
         probs.append(predict_proba(seq, models))
     return np.mean(probs, 0) if probs else None                # 창이 여러 개면 평균

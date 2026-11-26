@@ -47,8 +47,37 @@ form.addEventListener('submit', async function (event) {
         body: formData,
     });
 
-    // 4. Django가 돌려준 JSON 응답 확인하기
-    const data = await response.json();
-    console.log('Django 응답:', data);
-    resultDiv.textContent = JSON.stringify(data);
+    // 4. POST 응답 JSON 꺼내기
+    const postData = await response.json();
+    console.log('POST 응답:', postData);
+
+    // POST 에러 처리 (예: 400 파일 없음, 502 FastAPI 서버 꺼짐)
+    if (!response.ok) {
+        resultDiv.textContent = `요청 실패 (${response.status}): ${postData.error || '서버 오류'}`;
+        return;
+    }
+
+    // --- [STEP 9] 저장된 결과를 기록 ID로 다시 조회(GET)해서 화면에 표시 ---
+
+    // 5. POST 응답에서 DB 기록 번호(id) 꺼내기
+    const recordId = postData.id;
+
+    // 6. 기록 번호로 Django에 GET 요청 보내기 (읽기 전용이라 CSRF 토큰 필요 없음)
+    const getResponse = await fetch(`/api/v1/analyze/${recordId}/`);
+    const record = await getResponse.json();
+    console.log('DB에서 다시 가져온 결과:', record);
+
+    // GET 에러 처리 (예: 404 없는 기록)
+    if (!getResponse.ok) {
+        resultDiv.textContent = `결과 조회 실패 (${getResponse.status}): ${record.detail || '오류'}`;
+        return;
+    }
+
+    // 7. DB에서 가져온 상태(status)에 따라 화면(#result)에 표시
+    if (record.status === 'COMPLETED') {
+        const percent = (record.confidence * 100).toFixed(1);
+        resultDiv.textContent = `예측 동작: ${record.predicted_label} (신뢰도 ${percent}%)`;
+    } else {
+        resultDiv.textContent = '분석에 실패했습니다.';
+    }
 });

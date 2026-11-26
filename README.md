@@ -1,5 +1,30 @@
 # team3-vision_action_platform
 
+## 진행 상황
+
+개발 순서는 강사 가이드 「3개 역할 분리 - 최소 기능부터 완성하는 단계별 협업」의 STEP을 따른다.
+
+| STEP | 내용 | 담당 | 상태 |
+|---|---|---|---|
+| 1 | HTML에 AI 분석 버튼 만들기 | A1 | ✅ 완료 (PR #1) |
+| 2 | JavaScript에서 submit 이벤트 받기 | A2 | ✅ 완료 (PR #1) |
+| 3 | Django에서 `/analyses/` 화면 열기 | B1 + A1 | ✅ 완료 (PR #2, #3) |
+| 4 | JavaScript → Django API로 영상 전송 | A2 + B1 | ✅ 완료 (`hu` 브랜치 PR) |
+| 5 | Django → DB에 업로드 기록 저장 (`InferenceRecord`) | B2 + B1 | ⬜ 다음 단계 |
+| 6 | 기존 학습 모델로 실제 영상 추론 | C1 | 🔄 진행 중 (`hyesung` 브랜치) |
+| 7 | FastAPI에서 추론 결과 반환 | C2 + C1 | ⬜ |
+| 8 | Django ↔ FastAPI HTTP 연결 | B1 + C2 | ⬜ |
+| 9 | 저장된 결과를 JavaScript로 표시 | B1 + B2 + A2 | ⬜ |
+| 10 | 기능 파이프라인 추적·정리 | 전원 | ⬜ |
+
+### STEP 4 요약
+
+- A2: `analyze.js`가 영상을 `FormData`의 `video` 필드에 담아 `POST /api/v1/analyze/`로 보낸다. CSRF 토큰은 `X-CSRFToken` 헤더로 보낸다.
+- B1: DRF 설치, `analyses/api_urls.py` 추가, `views.analyze`가 파일명과 크기를 JSON으로 돌려준다.
+- 응답 예: `{"filename": "sample.mp4", "size": 204800}`. 영상이 없으면 `400`.
+- DB 저장(STEP 5)과 FastAPI 호출(STEP 8)은 아직 하지 않는다.
+- CSRF 처리 방침은 아래 "CSRF 처리 (STEP 4)" 참고.
+
 ## Backend (Django) 실행
 
 ```bash

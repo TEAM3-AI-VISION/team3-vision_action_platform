@@ -6,30 +6,38 @@
 4. ExtraTrees 확률과 1D-CNN 확률의 평균 → 17동작 확률
 5. 사람별 1등·top3
 
+함수 부르는 순서 (맨 아래 predict_video 부터 읽으면 된다)
+    predict_video(영상 경로)          ai/main.py 가 부르는 입구
+        - load_models()             모델 파일 3개 읽기
+        - track_people()            Frame 마다 사람·관절 찾기 → frame_values() 로 특징값 40개
+        - 사람마다 predict_person()  8초 창 → 30-step
+            - predict_proba()       ExtraTrees + 1D-CNN 확률 평균 (motion_summary() 86개 포함)
+
 값을 만드는 계산과 기준 숫자는 학습 때와 똑같아야 한다. 하나라도 다르면 모델이 엉뚱한 답을 낸다.
 실행: python inference.py video.mp4
 """
-import json
-import sys
-import time
-from functools import lru_cache
+import json                             # 결과 출력
+import sys                              # 명령줄에서 영상 경로 받기
+import time                             # 처리 시간 재기
+from functools import lru_cache         # 모델을 한 번만 읽게
 from pathlib import Path
 
-import cv2
-import joblib
-import numpy as np
-import torch
-from scipy.signal import find_peaks
+import cv2                              # 영상 열기, Frame 읽기 (OpenCV)
+import joblib                           # ExtraTrees 모델 파일 읽기
+import numpy as np                      # 숫자 계산
+import torch                            # 1D-CNN 실행 (PyTorch)
+from scipy.signal import find_peaks     # 봉우리 개수 세기 (팔을 몇 번 굽혔다 폈나)
 from torch import nn
-from ultralytics import YOLO
+from ultralytics import YOLO            # 사람·관절 찾기 (YOLO Pose)
 
-MODEL_DIR = Path(__file__).parent / "models"
+# ---------------------------------------------------------------- 설정 숫자 (학습 때와 같아야 함)
+MODEL_DIR = Path(__file__).parent / "models"    # 이 파일 옆 models 폴더
 STEPS = 30          # 창 하나를 30-step Sequence 로 리샘플링
 WINDOW = 8.0        # Sliding Window 길이(초). 학습 영상 중간값 5.4초 → 동작 하나가 들어간다
 STRIDE = 4.0        # 긴 영상은 4초씩 밀며 여러 창
 UNCERTAIN = 0.3     # 1등 확률이 이보다 낮으면 불확실
 PROCESS_FPS = 15    # 1초에 15장만 관절을 찾는다. 30장과 1등이 같고(영상 84개) 시간은 절반
-ACTIONS = {
+ACTIONS = {         # 동작 번호 → 한글 이름 (결과의 action_name_ko)
     "A001": "키오스크 두드리기", "A002": "한손 물건 던지기", "A003": "앞차기", "A004": "잡고 흔들기",
     "A005": "밀치기", "A006": "휘두르기", "A007": "바닥에 앉기", "A008": "위에 앉기", "A009": "앞으로 눕기",
     "A010": "뒤로 눕기", "A011": "몸통 박치기", "A012": "쪼그려 물건 빼내기", "A013": "샷건", "A014": "구토",
@@ -38,30 +46,35 @@ ACTIONS = {
 
 
 class CNN(nn.Module):
-    """1D-CNN: (값 40 + 변화량 40, 30-step) → 17동작. 층 순서가 저장된 가중치와 같아야 한다."""
+    """1D-CNN: (값 40 + 변화량 40, 30-step) → 17동작. 층 순서가 저장된 가중치와 같아야 한다.
+    action_cnn.pt 에는 숫자(가중치)만 있어서, 숫자를 끼울 틀을 여기 똑같이 적어 둔다.
+    """
 
-    def __init__(self, c_in, n_cls, w):
+    def __init__(self, c_in, n_cls, w):     # c_in 80채널, n_cls 17동작, w 128
         super().__init__()
 
-        def block(a, b, k):
+        def block(a, b, k):                 # 시간 축을 k 칸씩 훑는 층 하나
             return nn.Sequential(nn.Conv1d(a, b, k, padding=k // 2), nn.BatchNorm1d(b), nn.ReLU())
-        self.f = nn.Sequential(block(c_in, w, 5), block(w, w, 5), nn.Dropout(0.3), block(w, 2 * w, 3))
-        self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(4 * w, n_cls))
+        self.f = nn.Sequential(block(c_in, w, 5), block(w, w, 5), nn.Dropout(0.3), block(w, 2 * w, 3))  # 80 → 128 → 128 → 256
+        self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(4 * w, n_cls))    # 512 → 17동작 점수
 
     def forward(self, x):
-        h = self.f(x)
-        return self.head(torch.cat([h.mean(2), h.amax(2)], 1))
+        h = self.f(x)                                               # (1, 256채널, 30-step)
+        return self.head(torch.cat([h.mean(2), h.amax(2)], 1))      # 시간 평균 256 + 최대 256 = 512
 
 
 @lru_cache(maxsize=1)
 def load_models():
-    """처음 요청 때 한 번만 읽고, 다음 요청부터는 다시 씀"""
+    """처음 요청 때 한 번만 읽고, 다음 요청부터는 다시 씀
+    돌려주는 것: pose(YOLO), trees(ExtraTrees), cnns(1D-CNN 3개), mu·sd, ids(동작 번호 17개)
+    """
+    # weights_only: 숫자만 읽고 파일 안의 코드는 실행하지 않는다
     ckpt = torch.load(MODEL_DIR / "action_cnn.pt", map_location="cpu", weights_only=True)
     cnns = []
     for state in ckpt["state_dicts"]:               # 난수만 바꿔 3번 학습한 CNN → 확률 평균
-        net = CNN(2 * ckpt["n_frame"], ckpt["n_cls"], ckpt["width"])
-        net.load_state_dict(state)
-        cnns.append(net.eval())
+        net = CNN(2 * ckpt["n_frame"], ckpt["n_cls"], ckpt["width"])    # 틀 만들기 (80, 17, 128)
+        net.load_state_dict(state)                                      # 틀에 숫자 끼우기
+        cnns.append(net.eval())                                         # eval: 판단 모드 (Dropout 끔)
     trees = joblib.load(MODEL_DIR / "action_model.joblib")
     return {"pose": YOLO(str(MODEL_DIR / "yolo11m-pose.pt")), "trees": trees, "cnns": cnns,
             "mu": ckpt["mu"].numpy(), "sd": ckpt["sd"].numpy(),       # CNN 입력 정규화용 학습 때 평균·표준편차
@@ -72,51 +85,55 @@ def load_models():
 def frame_values(kp, w, h):
     """관절 17개 (x, y px) → 특징값 40개, 쓸 수 있는 Frame 인지
     34 = 골반 중심 기준 좌표 ÷ 몸 크기 (정규화: 카메라와 멀든 가깝든 같은 값)
-     4 = 팔꿈치·무릎 각도
-     2 = 골반의 화면 위치 0~1 (넘어지면 아래로)
+    4 = 팔꿈치·무릎 각도
+    2 = 골반의 화면 위치 0~1 (넘어지면 아래로)
+    관절 번호(COCO): 0 코, 5·6 어깨, 7·8 팔꿈치, 9·10 손목, 11·12 골반, 13·14 무릎, 15·16 발목 (홀수가 왼쪽)
     """
-    hip, shoulder = (kp[11] + kp[12]) / 2.0, (kp[5] + kp[6]) / 2.0
-    shoulder_w = float(np.linalg.norm(kp[5] - kp[6]))
+    hip, shoulder = (kp[11] + kp[12]) / 2.0, (kp[5] + kp[6]) / 2.0     # 골반 가운데, 어깨 가운데
+    shoulder_w = float(np.linalg.norm(kp[5] - kp[6]))                  # 어깨 폭 (두 점 사이 거리)
     # 몸 크기 = 몸통 길이와 (어깨 폭 ÷ 0.70) 중 큰 쪽. 옆모습(어깨 폭↓)·누운 자세(몸통↓)에서도 0 이 안 되게
     size = max(float(np.linalg.norm(hip - shoulder)), shoulder_w / 0.70)
     if size < 5.0 or shoulder_w < 1e-8:                          # 5px 도 안 되면 너무 작거나 잘못 찾은 사람
         return np.full(40, np.nan), False
+    # 각도 4개: 꼭짓점(팔꿈치·무릎)에서 양쪽 관절로 가는 두 방향 사이의 각
     joint = kp[[7, 8, 13, 14]]                                   # 꼭짓점: 팔꿈치·무릎
     ba, bc = kp[[5, 6, 11, 12]] - joint, kp[[9, 10, 15, 16]] - joint   # → 어깨·골반, → 손목·발목
     with np.errstate(invalid="ignore", divide="ignore"):         # 관절이 겹치면 각도 없음(nan)
         cos = (ba * bc).sum(1) / (np.linalg.norm(ba, axis=1) * np.linalg.norm(bc, axis=1))
-    angles = np.degrees(np.arccos(np.clip(cos.astype(np.float64), -1.0, 1.0)))
+    angles = np.degrees(np.arccos(np.clip(cos.astype(np.float64), -1.0, 1.0)))    # cos → 각도(°)
+    # 40개 = 좌표 34 (골반 기준 ÷ 몸 크기) + 각도 4 + 골반 화면 위치 2
     values = np.r_[np.round(((kp - hip) / size).reshape(-1), 6), np.round(angles, 6),   # 학습 데이터와 같은 자릿수
                    round(float(hip[0]) / w, 4), round(float(hip[1]) / h, 4)]
-    return values, bool(np.isfinite(values).all())
+    return values, bool(np.isfinite(values).all())               # 40개가 다 숫자면 쓸 수 있는 Frame
 
 
 def track_people(path, models):
     """영상 → {사람 번호: [(시간, 특징값 40개, 쓸 수 있나, 관절 Confidence 평균), ...]}"""
-    cap = cv2.VideoCapture(str(path))
+    cap = cv2.VideoCapture(str(path))               # 영상 열기
     if not cap.isOpened():
-        raise ValueError("영상 파일을 열 수 없습니다.")
+        raise ValueError("영상 파일을 열 수 없습니다.")     # ai/main.py 가 422 로 바꾼다
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not 0 < fps <= 240:                          # fps 정보가 없거나 이상하면 30 으로
         fps = 30.0
     step = max(1, round(fps / PROCESS_FPS))         # 30fps 영상은 2장 중 1장, 60fps 는 4장 중 1장
-    people, n = {}, 0
+    people, n = {}, 0                               # n = 지금까지 읽은 Frame 수
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        ok, frame = cap.read()                      # Frame 한 장 읽기
+        if not ok:                                  # 영상 끝
             break
         n += 1
-        if (n - 1) % step:
+        if (n - 1) % step:                          # step 장마다 1장만 처리 (나머지는 건너뜀)
             continue
         # imgsz·conf 는 학습 데이터를 만들 때와 같은 값. persist: 앞 Frame 의 사람 번호를 이어 받는다
         result = models["pose"].track(frame, persist=n > 1, tracker="bytetrack.yaml", imgsz=640, conf=0.25,
                                       verbose=False)[0]
         if result.boxes.id is None:
             continue                                # 이 Frame 에는 사람이 없음
+        # 찾은 사람마다: 사람 번호, 관절 17개 (x, y), 관절 Confidence 17개
         for tid, kp, conf in zip(result.boxes.id.int().tolist(), result.keypoints.xy.cpu().numpy(),
                                  result.keypoints.conf.cpu().numpy()):
-            values, usable = frame_values(kp, frame.shape[1], frame.shape[0])
-            people.setdefault(tid, []).append(((n - 1) / fps, values, usable, float(conf.mean())))
+            values, usable = frame_values(kp, frame.shape[1], frame.shape[0])     # 가로, 세로
+            people.setdefault(tid, []).append(((n - 1) / fps, values, usable, float(conf.mean())))   # 시간(초)
     cap.release()
     if n == 0:
         raise ValueError("영상에서 Frame 을 읽지 못했습니다.")
@@ -190,22 +207,22 @@ def motion_summary(seq):
 def predict_proba(seq, models):
     """30-step × 40 → 17동작 확률"""
     seq = seq[None]                                             # (1, 30, 40)
-    lo, hi = seq.min(1), seq.max(1)
+    lo, hi = seq.min(1), seq.max(1)                             # 40개마다 30칸 중 최소·최대
     # ExtraTrees 입력 2,646 = 값 1,200 + 변화량 1,160 + 평균·표준편차·최소·최대·범위 200 + 움직임 요약 86
     features = np.hstack([seq.reshape(1, -1), np.diff(seq, axis=1).reshape(1, -1), seq.mean(1), seq.std(1),
                           lo, hi, hi - lo, motion_summary(seq[0, :, :38])[None]])
-    p_trees = models["trees"].predict_proba(features)
-    # 1D-CNN 입력: 값 40 + 변화량 40 채널, 30-step
+    p_trees = models["trees"].predict_proba(features)          # (1, 17) 나무 1,000개의 투표 비율
+    # 1D-CNN 입력: 값 40 + 변화량 40 채널, 30-step. transpose 로 (1, 80, 30) = (채널, 시간) 순서
     cnn_in = np.concatenate([seq, np.diff(seq, axis=1, prepend=seq[:, :1])], 2).transpose(0, 2, 1).astype(np.float32)
-    with torch.no_grad():
-        x = torch.tensor((cnn_in - models["mu"]) / models["sd"])
-        p_cnn = np.mean([torch.softmax(net(x), 1).numpy() for net in models["cnns"]], 0)
-    return ((p_trees + p_cnn) / 2)[0]
+    with torch.no_grad():                                       # 학습이 아니니 기울기 계산은 끈다
+        x = torch.tensor((cnn_in - models["mu"]) / models["sd"])    # 학습 때 평균·표준편차로 맞춤
+        p_cnn = np.mean([torch.softmax(net(x), 1).numpy() for net in models["cnns"]], 0)    # CNN 3개 확률 평균
+    return ((p_trees + p_cnn) / 2)[0]                           # 두 모델 평균 → 17동작 확률
 
 
 def predict_person(track, models):
     """한 사람 → 17동작 확률 (판단할 수 없으면 None)"""
-    times, values, usable, conf = map(np.array, zip(*track))
+    times, values, usable, conf = map(np.array, zip(*track))       # 시간, 특징값 40개, 쓸 수 있나, Confidence
     if times[-1] - times[0] < 1.0 or round(conf.mean(), 3) < 0.4:   # 1초도 안 보였거나, 관절이 흐릿함(의자·가방)
         return None
     # 8초 이하면 창 하나, 길면 4초씩 밀며 여러 창 (마지막 창은 끝에 맞춤)
@@ -214,13 +231,14 @@ def predict_person(track, models):
     else:
         starts = [*np.arange(times[0], times[-1] - WINDOW, STRIDE), times[-1] - WINDOW]
     probs = []
-    for start in starts:
+    for start in starts:                                        # 창마다
         inside = (times >= start - 1e-9) & (times <= start + WINDOW + 1e-9)   # 1e-9: 소수점 오차
         good = inside & usable
         if good.sum() < 10 or good.sum() / inside.sum() < 0.5:   # 쓸 수 있는 Frame 이 10장 미만·절반 미만이면 버림
             continue
         t, v = times[good], values[good]
         pos = (t - t[0]) / (t[-1] - t[0])                       # 창 안의 위치 0~1 → 30-step 으로 고르게 리샘플링
+        # 0~1 을 30칸으로 나눈 자리마다, 특징값 40개를 앞뒤 Frame 값으로 채운다(보간) → (30, 40)
         seq = np.stack([np.interp(np.linspace(0.0, 1.0, STEPS), pos, v[:, j]) for j in range(40)], 1)
         probs.append(predict_proba(seq, models))
     return np.mean(probs, 0) if probs else None                # 창이 여러 개면 평균
@@ -228,26 +246,28 @@ def predict_person(track, models):
 
 # ---------------------------------------------------------------- 5. 영상 하나 → 결과
 def predict_video(path):
+    """MP4 경로 → {message, processing_seconds, predictions}. ai/main.py 가 부르는 입구"""
     started = time.perf_counter()
-    models = load_models()
-    people = track_people(path, models)
+    models = load_models()                                     # 모델 (두 번째 요청부터는 읽어 둔 것)
+    people = track_people(path, models)                        # 사람별 Frame 기록
     predictions = []
     for tid, track in sorted(people.items()):                  # 사람마다 따로 판단
         prob = predict_person(track, models)
         if prob is None:
             continue
+        # 확률 큰 순서로 3개
         top3 = [{"action_id": models["ids"][i], "action_name_ko": ACTIONS[models["ids"][i]],
                  "probability": round(float(prob[i]), 4)} for i in np.argsort(prob)[::-1][:3]]
         best = top3[0]
         predictions.append({"track_id": tid, "action_id": best["action_id"], "action_name_ko": best["action_name_ko"],
                             "confidence": best["probability"], "uncertain": best["probability"] < UNCERTAIN,
                             "top3": top3})
-    message = ""
+    message = ""                                                # 아무도 판단 못 했을 때만 이유를 적는다 (오류 아님)
     if not predictions:
         message = "사람은 보였지만 동작을 판단하지 못했습니다." if people else "영상에서 사람을 찾지 못했습니다."
     return {"message": message, "processing_seconds": round(time.perf_counter() - started, 2),   # 7초 영상이 GPU 약 3초, CPU 약 16초
             "predictions": predictions}
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":                                     # python inference.py video.mp4 로 직접 실행할 때
     print(json.dumps(predict_video(sys.argv[1]), ensure_ascii=False, indent=2))
